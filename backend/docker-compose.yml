@@ -1,0 +1,13 @@
+services:
+  # Postgres runs natively on this machine (postgresql-x64-18 Windows service on 5432),
+  # not in Docker — see DATABASE_URL in .env. Only RabbitMQ is containerized here.
+  rabbitmq:
+    image: rabbitmq:3-management
+    ports:
+      - "5672:5672"
+      - "15672:15672" # management UI — docs/02, docs/12
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
