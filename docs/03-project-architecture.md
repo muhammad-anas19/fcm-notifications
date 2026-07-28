@@ -231,6 +231,45 @@ argument removing:
 | A deploy of a one-line email template fix redeploys (and risks) the entire HTTP API. | Deploying the email worker touches nothing the API depends on. |
 | CPU/connection budgeting is shared and unpredictable — a burst of queue messages competes with HTTP request handling for the same event loop. | Each process has its own resource budget, tuned to its own workload (workers: prefetch + concurrency; API: request concurrency). |
 
+## Why four apps specifically — and is that actually necessary?
+
+The table above justifies splitting *API* from *workers*. It doesn't yet justify the next
+question: why does each **channel** get its own worker app (`router-worker`, `push-worker`,
+`inapp-worker`, and eventually `email-worker`) instead of one `workers` app that starts three
+consumers — one per queue — inside a single process?
+
+**Honest answer: no, it is not strictly necessary.** Nothing about RabbitMQ, NestJS, or this
+project's correctness requires one process per channel. A single `apps/workers/main.ts` that
+calls `messagingService.consume()` three times (once for `router.queue`, once for `push.queue`,
+once for `inapp.queue`) would work identically for everything we tested in the smoke test —
+same topology, same retry/DLQ behavior, same delivery logs. In fact, for this project's actual
+traffic (a handful of test notifications), the four-process split is more operational overhead
+than the workload justifies today.
+
+So why build it this way anyway? Two reasons, both about what happens *if this had to scale or
+harden in a way this project's traffic never actually forces it to*:
+
+1. **Per-channel failure isolation, not just API-vs-worker isolation.** If `push-worker` and
+   `inapp-worker` shared one process and a bug in the FCM integration (say, a malformed
+   credential causing repeated unhandled rejections) crashed that process, in-app delivery — a
+   completely unrelated channel — would go down with it, even though nothing about in-app
+   delivery was broken. Splitting by channel means a push-specific bug can only ever take down
+   push delivery.
+2. **Per-channel scaling, not just API-vs-worker scaling.** Push volume and in-app volume don't
+   necessarily move together — a promotional push campaign can spike push traffic 50x while
+   in-app volume stays flat. `docker compose up --scale push-worker=5` (or the equivalent
+   Kubernetes replica count) lets you add capacity exactly where the bottleneck is. One shared
+   `workers` process would force you to scale all three consumers together even though only one
+   of them is actually behind.
+
+Both of these are genuinely *production* concerns — they matter at a traffic and reliability
+bar this learning project doesn't actually operate at. The four-app split is here because it's
+the shape a real system takes once those concerns become real, and building it now means the
+architecture doesn't need a rewrite later — not because four processes were required to make
+today's smoke test pass. If you were optimizing purely for "least moving parts for a project
+this size," collapsing all three consumers into one `apps/workers` process would be a completely
+reasonable simplification, and you'd lose only the two properties above, not correctness.
+
 **Recommendation: a NestJS monorepo using `apps/`,** not one app or N unrelated repos. NestJS's
 CLI natively supports multiple `apps/*` entry points sharing `libs/*` code, compiled and run
 independently but versioned and reviewed together. This gets us both things at once: genuine
